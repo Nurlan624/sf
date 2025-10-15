@@ -1,6 +1,8 @@
-# snackbot_webhook_full.py
-# Полная логика бота (меню, корзина, удаление, комментарии, доставка 99 ₽, статусы для админа)
-# Запуск через WEBHOOK (подходит для Render/Heroku/Railway)
+# sf.py
+# Полная логика бота (вебхук для Render/Heroku, хранение заказов в SQLite)
+# Фичи: меню, корзина, удаление позиций, комментарий, доставка 99 ₽, статусы для админа
+# Требования: python-telegram-bot[webhooks]==20.7, python-dotenv==1.0.1
+# Рекомендуемая версия Python на Render: 3.11.x (runtime.txt -> python-3.11.9)
 
 import os, asyncio, json, sqlite3, re, logging
 from datetime import datetime
@@ -12,24 +14,34 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, filters
 )
 
-# --- .env (опционально) --------------------------------------------------------
+# ---------------- .env ----------------
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except Exception:
     pass
 
-# --- Конфиг --------------------------------------------------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x}
 DB_PATH = os.getenv("DB_PATH", "orders.db")
 
-# WEBHOOK-переменные (обязательны на Render/Heroku)
+# WEBHOOK (Render/Heroku): можно указать BASE_URL вручную,
+# иначе пробуем взять из переменных окружения Render.
+def _auto_base_url() -> str:
+    base = os.getenv("BASE_URL") or os.getenv("RENDER_EXTERNAL_URL")
+    if base:
+        return base.rstrip("/")
+    host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+    if host:
+        return f"https://{host}".rstrip("/")
+    return ""
+
+BASE_URL = _auto_base_url()
 WEBHOOK_SECRET_PATH = os.getenv("WEBHOOK_SECRET_PATH", "tgwebhook")
-BASE_URL = os.getenv("BASE_URL", "")  # например: https://your-service.onrender.com
 PORT = int(os.environ.get("PORT", "10000"))
 
 DELIVERY_FEE = 99  # фиксированная стоимость доставки
+ROOM_RE = re.compile(r'^\d+[A-Za-zА-Яа-я]$')
 
 MENU: Dict[str, tuple] = {
     "energy": ("ЭНЕРГЕТИК", 65),
@@ -41,15 +53,14 @@ MENU: Dict[str, tuple] = {
     "7up": ("СЕВЭНАП (ориг)", 105),
 }
 
-ROOM_RE = re.compile(r'^\d+[A-Za-zА-Яа-я]$')
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("snackbot")
 
 STATE: Dict[int, Dict[str, Any]] = {}
 
-# --- База данных ---------------------------------------------------------------
+# ---------------- DB ----------------
 def db_init():
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
@@ -70,14 +81,13 @@ def db_init():
     conn.close()
 
 def db_insert_order(user_id:int, username:str, room:str, items:Dict[str,int], note:str, total:int)->int:
-    """total — итог (товары + доставка)"""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     now = datetime.now().isoformat(timespec="seconds")
     cur.execute("""
         INSERT INTO orders (user_id, username, room, items_json, note, total, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, 'NEW', ?, ?)
-    """, (user_id, username, room, json.dumps(items, ensure_ascii=False), note or "", total, now, now))
+    """, (user_id, username or "", room, json.dumps(items, ensure_ascii=False), note or "", total, now, now))
     conn.commit()
     oid = cur.lastrowid
     conn.close()
@@ -103,7 +113,7 @@ def db_get_order(order_id:int):
     rec["items"] = json.loads(rec["items_json"]) if rec["items_json"] else {}
     return rec
 
-# --- UI/Helpers ----------------------------------------------------------------
+# ---------------- Helpers/UI ----------------
 def fmt_items(cart:Dict[str,int])->str:
     if not cart: return "—"
     return "\n".join(f"• {MENU[k][0]} ×{q} = {MENU[k][1]*q}₽" for k,q in cart.items())
@@ -127,7 +137,6 @@ def admin_order_kb(order_id:int)->InlineKeyboardMarkup:
     ])
 
 def cart_keyboard(cart:Dict[str,int])->InlineKeyboardMarkup:
-    """Кнопки для удаления по каждой позиции + оформить/добавить ещё"""
     kb = []
     for k,q in cart.items():
         kb.append([InlineKeyboardButton(f"➖ Убрать {MENU[k][0]}", callback_data=f"del:{k}")])
@@ -135,7 +144,7 @@ def cart_keyboard(cart:Dict[str,int])->InlineKeyboardMarkup:
                InlineKeyboardButton("✅ Оформить", callback_data="checkout")])
     return InlineKeyboardMarkup(kb)
 
-# --- Основная логика ------------------------------------------------------------
+# ---------------- Bot Logic ----------------
 async def ensure_state(update: Update)->Dict[str,Any]:
     chat_id = update.effective_chat.id
     if chat_id not in STATE:
@@ -310,7 +319,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             st["note"] = text
         st["awaiting"] = None
-        # показать ещё раз итог перед подтверждением
         subtotal = get_cart_subtotal(st["cart"])
         grand = subtotal + DELIVERY_FEE
         await update.message.reply_text(
@@ -325,28 +333,26 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("Добавляй позиции из меню:", reply_markup=menu_keyboard())
 
-# --- WEBHOOK-запуск ------------------------------------------------------------
+# ---------------- Run (Webhook) ----------------
 async def run():
     if not BOT_TOKEN:
         raise RuntimeError("Не указан BOT_TOKEN")
-    if not BASE_URL:
-        raise RuntimeError("Не указан BASE_URL (домен Render/Heroku)")
-
     db_init()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    # обработчики
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    # Сначала удалим старый webhook и поставим новый
-    await app.bot.delete_webhook(drop_pending_updates=False)
-    webhook_url = f"{BASE_URL}/{WEBHOOK_SECRET_PATH}"
-    await app.bot.set_webhook(webhook_url)
-    log.info(f"Webhook установлен: {webhook_url}")
+    # Вебхук: пытаемся определить BASE_URL автоматически, если не задан
+    if not BASE_URL:
+        raise RuntimeError("BASE_URL не задан и не удалось определить автоматически. Укажи BASE_URL в Environment.")
 
-    # Запускаем aiohttp-сервер
+    await app.bot.delete_webhook(drop_pending_updates=False)
+    webhook_url = f"{BASE_URL.rstrip('/')}/{WEBHOOK_SECRET_PATH}"
+    await app.bot.set_webhook(webhook_url)
+    log.info(f"Webhook установлен: {webhook_url} (порт {PORT})")
+
     await app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
