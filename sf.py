@@ -1,6 +1,6 @@
 # sf.py
 # Вебхук-бот для Render/Heroku: меню, корзина, удаление, комментарий, доставка 99 ₽, статусы для админа.
-# FIX: убран лишний asyncio.run/await для run_webhook (исправляет "event loop is already running").
+# FIX: исправлены опечатки DELIVERY_FЕЕ → DELIVERY_FEE; добавлен error handler.
 # Требования: python-telegram-bot[webhooks] (рекомендуем 21.6), python-dotenv (опц.).
 
 import os, json, sqlite3, re, logging
@@ -259,7 +259,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Аудитория: {st['room']}\n"
             f"{fmt_items(st['cart'])}\n\n"
             f"💰 Товары: {subtotal}₽\n"
-            f"🚚 Доставка: {DELIVERY_FЕЕ}₽\n"
+            f"🚚 Доставка: {DELIVERY_FEE}₽\n"
             f"Итого: {grand}₽\n"
             f"Комментарий: {note}"
         )
@@ -272,7 +272,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"✅ Заказ #{order_id} принят!\n\n"
             f"💰 Товары: {subtotal}₽\n"
-            f"🚚 Доставка: {DELIVERY_FЕЕ}₽\n"
+            f"🚚 Доставка: {DELIVERY_FEE}₽\n"
             f"Итого к оплате: {grand}₽\n"
             f"Комментарий: {note}"
         )
@@ -330,6 +330,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("Добавляй позиции из меню:", reply_markup=menu_keyboard())
 
+# ---------------- Error handler ----------------
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log.exception("Unhandled error in handler", exc_info=context.error)
+
 # ---------------- Main (blocking run_webhook) ----------------
 def main():
     if not BOT_TOKEN:
@@ -340,6 +344,7 @@ def main():
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    app.add_error_handler(on_error)
 
     base = BASE_URL
     if not base:
