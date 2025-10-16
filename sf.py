@@ -1,10 +1,9 @@
 # sf.py
-# Полная логика бота (вебхук для Render/Heroku, хранение заказов в SQLite)
-# Фичи: меню, корзина, удаление позиций, комментарий, доставка 99 ₽, статусы для админа
-# Требования: python-telegram-bot[webhooks]==20.7, python-dotenv==1.0.1
-# Рекомендуемая версия Python на Render: 3.11.x (runtime.txt -> python-3.11.9)
+# Вебхук-бот для Render/Heroku: меню, корзина, удаление, комментарий, доставка 99 ₽, статусы для админа.
+# FIX: убран лишний asyncio.run/await для run_webhook (исправляет "event loop is already running").
+# Требования: python-telegram-bot[webhooks] (рекомендуем 21.6), python-dotenv (опц.).
 
-import os, asyncio, json, sqlite3, re, logging
+import os, json, sqlite3, re, logging
 from datetime import datetime
 from typing import Dict, Any
 
@@ -25,8 +24,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x}
 DB_PATH = os.getenv("DB_PATH", "orders.db")
 
-# WEBHOOK (Render/Heroku): можно указать BASE_URL вручную,
-# иначе пробуем взять из переменных окружения Render.
 def _auto_base_url() -> str:
     base = os.getenv("BASE_URL") or os.getenv("RENDER_EXTERNAL_URL")
     if base:
@@ -40,7 +37,7 @@ BASE_URL = _auto_base_url()
 WEBHOOK_SECRET_PATH = os.getenv("WEBHOOK_SECRET_PATH", "tgwebhook")
 PORT = int(os.environ.get("PORT", "10000"))
 
-DELIVERY_FEE = 99  # фиксированная стоимость доставки
+DELIVERY_FEE = 99
 ROOM_RE = re.compile(r'^\d+[A-Za-zА-Яа-я]$')
 
 MENU: Dict[str, tuple] = {
@@ -262,7 +259,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Аудитория: {st['room']}\n"
             f"{fmt_items(st['cart'])}\n\n"
             f"💰 Товары: {subtotal}₽\n"
-            f"🚚 Доставка: {DELIVERY_FEE}₽\n"
+            f"🚚 Доставка: {DELIVERY_FЕЕ}₽\n"
             f"Итого: {grand}₽\n"
             f"Комментарий: {note}"
         )
@@ -275,7 +272,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"✅ Заказ #{order_id} принят!\n\n"
             f"💰 Товары: {subtotal}₽\n"
-            f"🚚 Доставка: {DELIVERY_FEE}₽\n"
+            f"🚚 Доставка: {DELIVERY_FЕЕ}₽\n"
             f"Итого к оплате: {grand}₽\n"
             f"Комментарий: {note}"
         )
@@ -333,8 +330,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("Добавляй позиции из меню:", reply_markup=menu_keyboard())
 
-# ---------------- Run (Webhook) ----------------
-async def run():
+# ---------------- Main (blocking run_webhook) ----------------
+def main():
     if not BOT_TOKEN:
         raise RuntimeError("Не указан BOT_TOKEN")
     db_init()
@@ -344,16 +341,13 @@ async def run():
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    # Вебхук: пытаемся определить BASE_URL автоматически, если не задан
-    if not BASE_URL:
-        raise RuntimeError("BASE_URL не задан и не удалось определить автоматически. Укажи BASE_URL в Environment.")
+    base = BASE_URL
+    if not base:
+        raise RuntimeError("BASE_URL не задан и не удалось определить автоматически. Укажи BASE_URL в Environment или положись на RENDER_EXTERNAL_URL.")
+    webhook_url = f"{base.rstrip('/')}/{WEBHOOK_SECRET_PATH}"
 
-    await app.bot.delete_webhook(drop_pending_updates=False)
-    webhook_url = f"{BASE_URL.rstrip('/')}/{WEBHOOK_SECRET_PATH}"
-    await app.bot.set_webhook(webhook_url)
-    log.info(f"Webhook установлен: {webhook_url} (порт {PORT})")
-
-    await app.run_webhook(
+    log.info(f"Starting webhook on 0.0.0.0:{PORT} → {webhook_url}")
+    app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path=WEBHOOK_SECRET_PATH,
@@ -361,4 +355,4 @@ async def run():
     )
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    main()
