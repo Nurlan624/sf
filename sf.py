@@ -40,7 +40,7 @@ BASE_URL = _auto_base_url()
 WEBHOOK_SECRET_PATH = os.getenv("WEBHOOK_SECRET_PATH", "tgwebhook")
 PORT = int(os.environ.get("PORT", "10000"))
 
-DELIVERY_FEE = 99
+DELIVERY_FEE = 0
 ROOM_RE = re.compile(r'^\d+[A-Za-zА-Яа-я]$')
 
 MENU: Dict[str, tuple] = {
