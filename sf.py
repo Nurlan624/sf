@@ -1,7 +1,10 @@
 # sf.py
 # Вебхук-бот: меню, корзина, удаление, комментарий, доставка 99 ₽, статусы для админа.
-# FIX: устойчивый парсинг items_json (поддержка старых записей в БД c str(dict)); error handler.
-# Совместимо с python-telegram-bot 21.x (рекомендуется 21.6).
+# FIX:
+# - устойчивый парсинг items_json (json -> ast.literal_eval -> {})
+# - исправление NameError: гарантируем наличие db_update_status и правильный импорт/порядок
+# - обработчик ошибок для логов
+# Совместимо с python-telegram-bot[webhooks] 21.x (рекомендуем 21.6).
 
 import os, json, sqlite3, re, logging
 from datetime import datetime
@@ -90,6 +93,15 @@ def db_insert_order(user_id:int, username:str, room:str, items:Dict[str,int], no
     conn.close()
     return oid
 
+def db_update_status(order_id:int, status:str):
+    """Обновление статуса заказа по id."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    now = datetime.now().isoformat(timespec="seconds")
+    cur.execute("UPDATE orders SET status=?, updated_at=? WHERE id=?", (status, now, order_id))
+    conn.commit()
+    conn.close()
+
 def _parse_items_json(value: str) -> Dict[str, int]:
     """Пытаемся распарсить корректный JSON; если нет — поддержим старый формат str(dict)."""
     if not value:
@@ -97,7 +109,6 @@ def _parse_items_json(value: str) -> Dict[str, int]:
     try:
         obj = json.loads(value)
         if isinstance(obj, dict):
-            # приведение типов
             return {str(k): int(v) for k, v in obj.items()}
         return {}
     except Exception as e_json:
@@ -120,7 +131,7 @@ def db_get_order(order_id:int):
         return None
     keys = ["id","user_id","username","room","items_json","note","total","status","created_at","updated_at"]
     rec = dict(zip(keys,row))
-    rec["items"] = _parse_items_json(rec["items_json"]) if rec.get("items_json") else {}
+    rec["items"] = _parse_items_json(rec.get("items_json") or "")
     return rec
 
 # ---------------- Helpers/UI ----------------
@@ -295,20 +306,34 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("adm:"):
-        _, oid_str, status = data.split(":")
-        order_id = int(oid_str)
+        try:
+            _, oid_str, status = data.split(":")
+            order_id = int(oid_str)
+        except Exception:
+            await query.answer("Неверный формат ID", show_alert=True)
+            return
+
         rec = db_get_order(order_id)
         if not rec:
-            await query.answer("Не найден", show_alert=True)
+            await query.answer("Заказ не найден", show_alert=True)
             return
+
+        # Обновляем статус (функция точно определена выше)
         db_update_status(order_id, status)
-        text_map = {"ACCEPTED": "✅ принят", "ON_THE_WAY": "🛵 в пути", "DELIVERED": "📦 доставлен", "CANCELED": "🚫 отменён"}
+
+        text_map = {
+            "ACCEPTED": "✅ принят",
+            "ON_THE_WAY": "🛵 в пути",
+            "DELIVERED": "📦 доставлен",
+            "CANCELED": "🚫 отменён"
+        }
         msg = f"Статус твоего заказа #{order_id}: {text_map.get(status, status)}"
         try:
             await context.bot.send_message(rec["user_id"], msg)
         except Exception:
             pass
         await context.bot.send_message(chat_id, text=f"Заказ #{order_id} обновлён → {text_map.get(status, status)}")
+        return
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
