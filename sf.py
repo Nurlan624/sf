@@ -1,7 +1,7 @@
 # sf.py
-# Вебхук-бот для Render/Heroku: меню, корзина, удаление, комментарий, доставка 99 ₽, статусы для админа.
-# FIX: исправлены опечатки DELIVERY_FЕЕ → DELIVERY_FEE; добавлен error handler.
-# Требования: python-telegram-bot[webhooks] (рекомендуем 21.6), python-dotenv (опц.).
+# Вебхук-бот: меню, корзина, удаление, комментарий, доставка 99 ₽, статусы для админа.
+# FIX: устойчивый парсинг items_json (поддержка старых записей в БД c str(dict)); error handler.
+# Совместимо с python-telegram-bot 21.x (рекомендуется 21.6).
 
 import os, json, sqlite3, re, logging
 from datetime import datetime
@@ -90,13 +90,25 @@ def db_insert_order(user_id:int, username:str, room:str, items:Dict[str,int], no
     conn.close()
     return oid
 
-def db_update_status(order_id:int, status:str):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    now = datetime.now().isoformat(timespec="seconds")
-    cur.execute("UPDATE orders SET status=?, updated_at=? WHERE id=?", (status, now, order_id))
-    conn.commit()
-    conn.close()
+def _parse_items_json(value: str) -> Dict[str, int]:
+    """Пытаемся распарсить корректный JSON; если нет — поддержим старый формат str(dict)."""
+    if not value:
+        return {}
+    try:
+        obj = json.loads(value)
+        if isinstance(obj, dict):
+            # приведение типов
+            return {str(k): int(v) for k, v in obj.items()}
+        return {}
+    except Exception as e_json:
+        try:
+            import ast
+            obj = ast.literal_eval(value)
+            if isinstance(obj, dict):
+                return {str(k): int(v) for k, v in obj.items()}
+        except Exception as e_ast:
+            log.warning("items_json parse failed; raw=%r; json_err=%r; ast_err=%r", value, e_json, e_ast)
+            return {}
 
 def db_get_order(order_id:int):
     conn = sqlite3.connect(DB_PATH)
@@ -104,19 +116,20 @@ def db_get_order(order_id:int):
     cur.execute("SELECT * FROM orders WHERE id=?", (order_id,))
     row = cur.fetchone()
     conn.close()
-    if not row: return None
+    if not row:
+        return None
     keys = ["id","user_id","username","room","items_json","note","total","status","created_at","updated_at"]
     rec = dict(zip(keys,row))
-    rec["items"] = json.loads(rec["items_json"]) if rec["items_json"] else {}
+    rec["items"] = _parse_items_json(rec["items_json"]) if rec.get("items_json") else {}
     return rec
 
 # ---------------- Helpers/UI ----------------
 def fmt_items(cart:Dict[str,int])->str:
     if not cart: return "—"
-    return "\n".join(f"• {MENU[k][0]} ×{q} = {MENU[k][1]*q}₽" for k,q in cart.items())
+    return "\n".join(f"• {MENU[k][0]} ×{q} = {MENU[k][1]*q}₽" for k,q in cart.items() if k in MENU)
 
 def get_cart_subtotal(cart:Dict[str,int])->int:
-    return sum(MENU[i][1]*q for i,q in cart.items())
+    return sum(MENU[i][1]*q for i,q in cart.items() if i in MENU)
 
 def menu_keyboard()->InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(f"{v[0]} — {v[1]}₽", callback_data=f"add:{k}")] for k,v in MENU.items()]
@@ -136,7 +149,8 @@ def admin_order_kb(order_id:int)->InlineKeyboardMarkup:
 def cart_keyboard(cart:Dict[str,int])->InlineKeyboardMarkup:
     kb = []
     for k,q in cart.items():
-        kb.append([InlineKeyboardButton(f"➖ Убрать {MENU[k][0]}", callback_data=f"del:{k}")])
+        if k in MENU:
+            kb.append([InlineKeyboardButton(f"➖ Убрать {MENU[k][0]}", callback_data=f"del:{k}")])
     kb.append([InlineKeyboardButton("➕ Добавить ещё", callback_data="back2menu"),
                InlineKeyboardButton("✅ Оформить", callback_data="checkout")])
     return InlineKeyboardMarkup(kb)
@@ -167,7 +181,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("add:"):
-        item = data.split(":")[1]
+        item = data.split(":", 1)[1]
         st["cart"][item] = st["cart"].get(item, 0) + 1
         subtotal = get_cart_subtotal(st["cart"])
         await query.edit_message_text(
@@ -194,7 +208,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("del:"):
-        item = data.split(":")[1]
+        item = data.split(":", 1)[1]
         if st["cart"].get(item, 0) > 1:
             st["cart"][item] -= 1
         else:
