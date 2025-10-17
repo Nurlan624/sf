@@ -1,14 +1,14 @@
 # sf.py
 # Вебхук-бот: меню, корзина, удаление, комментарий, доставка 99 ₽, статусы для админа.
-# FIX:
-# - устойчивый парсинг items_json (json -> ast.literal_eval -> {})
-# - исправление NameError: гарантируем наличие db_update_status и правильный импорт/порядок
-# - обработчик ошибок для логов
-# Совместимо с python-telegram-bot[webhooks] 21.x (рекомендуем 21.6).
+# FIX v3:
+# - Устойчивый парсинг items_json без лишних warning для "комнатных" строк (например, "455U/456В")
+# - Команда /fixdb для админа: миграция старых кривых записей в БД (очистка items_json, перенос аудитории при необходимости)
+# - Обработчик ошибок в логах
+# Совместимо с python-telegram-bot[webhooks] 21.x (рекомендуем 21.6)
 
 import os, json, sqlite3, re, logging
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -40,17 +40,17 @@ BASE_URL = _auto_base_url()
 WEBHOOK_SECRET_PATH = os.getenv("WEBHOOK_SECRET_PATH", "tgwebhook")
 PORT = int(os.environ.get("PORT", "10000"))
 
-DELIVERY_FEE = 0
+DELIVERY_FEE = 99
 ROOM_RE = re.compile(r'^\d+[A-Za-zА-Яа-я]$')
 
 MENU: Dict[str, tuple] = {
-    "energy": ("ЭНЕРГЕТИК(0.25 ориг)", 59),
-    "cola": ("КОЛА(0.33 ориг)", 99),
-    "chips": ("ЧИПСЫ", 69),
-    "pepsi": ("ПЕПСИ(0.33 ориг)", 95),
+    "energy": ("ЭНЕРГЕТИК", 65),
+    "cola": ("КОЛА (ориг)", 110),
+    "chips": ("ЧИПСЫ", 70),
+    "pepsi": ("ПЕПСИ (ориг)", 105),
     "water": ("ВОДА", 44),
-    "chocopie": ("ЧОКОПАЙ(шт)", 25),
-    "7up": ("СЕВЭНАП(0.33 ориг)", 95),
+    "chocopie": ("ЧОКОПАЙ", 25),
+    "7up": ("СЕВЭНАП (ориг)", 105),
 }
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -94,7 +94,6 @@ def db_insert_order(user_id:int, username:str, room:str, items:Dict[str,int], no
     return oid
 
 def db_update_status(order_id:int, status:str):
-    """Обновление статуса заказа по id."""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     now = datetime.now().isoformat(timespec="seconds")
@@ -103,8 +102,13 @@ def db_update_status(order_id:int, status:str):
     conn.close()
 
 def _parse_items_json(value: str) -> Dict[str, int]:
-    """Пытаемся распарсить корректный JSON; если нет — поддержим старый формат str(dict)."""
+    """Пытаемся распарсить корректный JSON; если нет — поддержим старый формат str(dict).
+    Если внутри случайно лежит 'комната' (например '455U'/'456В'), тихо возвращаем пустой dict без warning.
+    """
     if not value:
+        return {}
+    # если это на самом деле похоже на номер аудитории — не флудим в логи
+    if ROOM_RE.fullmatch(value.strip()):
         return {}
     try:
         obj = json.loads(value)
@@ -131,8 +135,39 @@ def db_get_order(order_id:int):
         return None
     keys = ["id","user_id","username","room","items_json","note","total","status","created_at","updated_at"]
     rec = dict(zip(keys,row))
-    rec["items"] = _parse_items_json(rec.get("items_json") or "")
+    rec["items"] = _parse_items_json((rec.get("items_json") or "").strip())
     return rec
+
+def db_sanitize():
+    """Оздоровление старых записей: очищаем items_json, если он не парсится;
+    если room пустая, а items_json выглядит как 'комната' — переносим в room.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT id, items_json, room FROM orders")
+    rows = cur.fetchall()
+    fixed = moved = 0
+    for oid, items_json, room in rows:
+        raw = (items_json or "").strip()
+        items = _parse_items_json(raw)
+        if items:
+            continue  # валидно
+        # если это похоже на аудиторию
+        if raw and ROOM_RE.fullmatch(raw):
+            if not room or room.strip() == "—":
+                cur.execute("UPDATE orders SET room=?, items_json='{}' WHERE id=?", (raw.upper(), oid))
+                moved += 1
+            else:
+                cur.execute("UPDATE orders SET items_json='{}' WHERE id=?", (oid,))
+                fixed += 1
+        else:
+            # просто очищаем битое значение
+            if raw not in ("", "{}", "null", "None"):
+                cur.execute("UPDATE orders SET items_json='{}' WHERE id=?", (oid,))
+                fixed += 1
+    conn.commit()
+    conn.close()
+    return fixed, moved
 
 # ---------------- Helpers/UI ----------------
 def fmt_items(cart:Dict[str,int])->str:
@@ -177,6 +212,14 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = await ensure_state(update)
     st["awaiting"] = "room"
     await update.message.reply_text("Привет! 🍫 Введи номер аудитории (цифры + буква, например 429Г):")
+
+async def fixdb_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Команда только для администраторов.")
+        return
+    fixed, moved = db_sanitize()
+    await update.message.reply_text(f"✅ База очищена.\nИсправлено записей: {fixed}\nПеренесено в room: {moved}")
 
 async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -294,12 +337,16 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 log.warning(f"Admin notify fail: {e}")
 
-        await query.edit_message_text(
-            f"✅ Заказ #{order_id} принят!\n\n"
-            f"💰 Товары: {subtotal}₽\n"
-            f"🚚 Доставка: {DELIVERY_FEE}₽\n"
-            f"Итого к оплате: {grand}₽\n"
-            f"Комментарий: {note}"
+        await query.edit_message_reply_markup(reply_markup=None)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"✅ Заказ #{order_id} принят!\n\n"
+                f"💰 Товары: {subtotal}₽\n"
+                f"🚚 Доставка: {DELIVERY_FEE}₽\n"
+                f"Итого к оплате: {grand}₽\n"
+                f"Комментарий: {note}"
+            ),
         )
         st["cart"].clear()
         st["note"] = None
@@ -318,7 +365,6 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Заказ не найден", show_alert=True)
             return
 
-        # Обновляем статус (функция точно определена выше)
         db_update_status(order_id, status)
 
         text_map = {
@@ -381,6 +427,7 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("fixdb", fixdb_cmd))
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_error_handler(on_error)
