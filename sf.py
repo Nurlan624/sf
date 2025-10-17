@@ -1,10 +1,7 @@
 # sf.py
-# Вебхук-бот: меню, корзина, удаление, комментарий, доставка 99 ₽, статусы для админа.
-# FIX v3:
-# - Устойчивый парсинг items_json без лишних warning для "комнатных" строк (например, "455U/456В")
-# - Команда /fixdb для админа: миграция старых кривых записей в БД (очистка items_json, перенос аудитории при необходимости)
-# - Обработчик ошибок в логах
-# Совместимо с python-telegram-bot[webhooks] 21.x (рекомендуем 21.6)
+# Бот-вебхук для Render: меню -> корзина -> (при оформлении) запрос аудитории -> комментарий (опционально /skip) -> подтверждение.
+# Включено: удаление из корзины, доставка 99 ₽, статусы для админа, /fixdb миграция кривых записей, устойчивый парсинг items_json.
+# Совместимо с python-telegram-bot[webhooks] 21.x (рекомендуем 21.6).
 
 import os, json, sqlite3, re, logging
 from datetime import datetime
@@ -107,7 +104,6 @@ def _parse_items_json(value: str) -> Dict[str, int]:
     """
     if not value:
         return {}
-    # если это на самом деле похоже на номер аудитории — не флудим в логи
     if ROOM_RE.fullmatch(value.strip()):
         return {}
     try:
@@ -138,9 +134,10 @@ def db_get_order(order_id:int):
     rec["items"] = _parse_items_json((rec.get("items_json") or "").strip())
     return rec
 
-def db_sanitize():
+def db_sanitize() -> Tuple[int, int]:
     """Оздоровление старых записей: очищаем items_json, если он не парсится;
     если room пустая, а items_json выглядит как 'комната' — переносим в room.
+    Возвращаем (count_fixed, moved_to_room).
     """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -151,8 +148,7 @@ def db_sanitize():
         raw = (items_json or "").strip()
         items = _parse_items_json(raw)
         if items:
-            continue  # валидно
-        # если это похоже на аудиторию
+            continue
         if raw and ROOM_RE.fullmatch(raw):
             if not room or room.strip() == "—":
                 cur.execute("UPDATE orders SET room=?, items_json='{}' WHERE id=?", (raw.upper(), oid))
@@ -161,7 +157,6 @@ def db_sanitize():
                 cur.execute("UPDATE orders SET items_json='{}' WHERE id=?", (oid,))
                 fixed += 1
         else:
-            # просто очищаем битое значение
             if raw not in ("", "{}", "null", "None"):
                 cur.execute("UPDATE orders SET items_json='{}' WHERE id=?", (oid,))
                 fixed += 1
@@ -179,9 +174,9 @@ def get_cart_subtotal(cart:Dict[str,int])->int:
 
 def menu_keyboard()->InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(f"{v[0]} — {v[1]}₽", callback_data=f"add:{k}")] for k,v in MENU.items()]
-    rows.append([InlineKeyboardButton("🏫 Сменить аудиторию", callback_data="change_room")])
     rows.append([InlineKeyboardButton("🧺 Корзина", callback_data="cart"),
                  InlineKeyboardButton("✅ Оформить", callback_data="checkout")])
+    rows.append([InlineKeyboardButton("🏫 Сменить аудиторию", callback_data="change_room")])
     return InlineKeyboardMarkup(rows)
 
 def admin_order_kb(order_id:int)->InlineKeyboardMarkup:
@@ -205,13 +200,17 @@ def cart_keyboard(cart:Dict[str,int])->InlineKeyboardMarkup:
 async def ensure_state(update: Update)->Dict[str,Any]:
     chat_id = update.effective_chat.id
     if chat_id not in STATE:
-        STATE[chat_id] = {"room": None, "cart": {}, "note": None, "awaiting": "room"}
+        STATE[chat_id] = {"room": None, "cart": {}, "note": None, "awaiting": None}
     return STATE[chat_id]
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = await ensure_state(update)
-    st["awaiting"] = "room"
-    await update.message.reply_text("Привет! 🍫 Введи номер аудитории (цифры + буква, например 429Г):")
+    # Новый сценарий: сначала меню, потом аудитория при оформлении
+    st["awaiting"] = None
+    await update.message.reply_text(
+        "Привет! 🍫 Выбирай из меню, доставка 99₽. Когда будешь готов — жми «Оформить».",
+        reply_markup=menu_keyboard()
+    )
 
 async def fixdb_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -220,6 +219,26 @@ async def fixdb_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     fixed, moved = db_sanitize()
     await update.message.reply_text(f"✅ База очищена.\nИсправлено записей: {fixed}\nПеренесено в room: {moved}")
+
+async def skip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка /skip — работает теперь как отдельная команда (не режется фильтром)."""
+    st = await ensure_state(update)
+    if st.get("awaiting") != "comment":
+        await update.message.reply_text("Сейчас нечего пропускать. Выбирай позиции в меню или жми «Оформить».",
+                                        reply_markup=menu_keyboard())
+        return
+    st["note"] = None
+    st["awaiting"] = None
+    subtotal = get_cart_subtotal(st["cart"])
+    grand = subtotal + DELIVERY_FEE
+    await update.message.reply_text(
+        "Комментарий пропущен ✅\n"
+        "Проверь сумму и подтверди заказ:\n"
+        f"💰 Товары: {subtotal}₽\n"
+        f"🚚 Доставка: {DELIVERY_FEE}₽\n"
+        f"Итого к оплате: {grand}₽",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💳 Подтвердить заказ", callback_data="confirm")]])
+    )
 
 async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -231,7 +250,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "change_room":
         st["awaiting"] = "room"
-        await query.edit_message_text("Введи новую аудиторию (например, 429г):")
+        await query.edit_message_text("Введи аудиторию (цифры + буква, например 429Г):")
         return
 
     if data.startswith("add:"):
@@ -292,10 +311,13 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not st["cart"]:
             await query.edit_message_text("Корзина пуста.", reply_markup=menu_keyboard())
             return
+        # Новый сценарий: если аудитория не указана — сначала спросим, потом комментарий/подтверждение
         if not st["room"]:
             st["awaiting"] = "room"
-            await query.edit_message_text("Введи номер аудитории (например, 429Г):")
+            await query.edit_message_text("Введи аудиторию (цифры + буква, например 429Г):")
             return
+
+        # если аудитория уже есть — сразу к подтверждению с опцией комментария
         subtotal = get_cart_subtotal(st["cart"])
         grand = subtotal + DELIVERY_FEE
         lines = [
@@ -350,6 +372,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         st["cart"].clear()
         st["note"] = None
+        # Аудиторию оставляем, чтобы было удобно, но можно сменить кнопкой «Сменить аудиторию».
         return
 
     if data.startswith("adm:"):
@@ -392,11 +415,29 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         st["room"] = text.upper()
         st["awaiting"] = None
-        await update.message.reply_text(f"✅ Аудитория установлена: {st['room']}", reply_markup=menu_keyboard())
+
+        # После установки аудитории показываем сводку и предлагаем комментарий/подтверждение
+        if not st["cart"]:
+            await update.message.reply_text("Аудитория сохранена. Корзина пуста — выбери позиции из меню:",
+                                            reply_markup=menu_keyboard())
+            return
+        subtotal = get_cart_subtotal(st["cart"])
+        grand = subtotal + DELIVERY_FEE
+        lines = [
+            f"📍 Аудитория {st['room']}",
+            fmt_items(st["cart"]),
+            f"\n💰 Товары: {subtotal}₽",
+            f"🚚 Доставка: {DELIVERY_FEE}₽",
+            f"Итого к оплате: {grand}₽"
+        ]
+        kb = [[InlineKeyboardButton("✍️ Добавить комментарий", callback_data="add_comment")],
+              [InlineKeyboardButton("💳 Подтвердить без комментария", callback_data="confirm")]]
+        await update.message.reply_text("Проверь заказ:\n" + "\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
         return
 
     if st.get("awaiting") == "comment":
         if text == "/skip":
+            # На случай если /skip придёт текстом (не как команда)
             st["note"] = None
         else:
             st["note"] = text
@@ -413,6 +454,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # По умолчанию — просто открываем меню снова
     await update.message.reply_text("Добавляй позиции из меню:", reply_markup=menu_keyboard())
 
 # ---------------- Error handler ----------------
@@ -427,6 +469,7 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("skip", skip_cmd))          # <-- фикс /skip
     app.add_handler(CommandHandler("fixdb", fixdb_cmd))
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
