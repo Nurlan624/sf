@@ -1,19 +1,18 @@
 # sf.py
-# Бот-вебхук для Render: меню -> корзина -> (при оформлении) запрос аудитории -> комментарий (опционально /skip) -> подтверждение.
-# Включено: удаление из корзины, доставка 99 ₽, статусы для админа, /fixdb миграция кривых записей, устойчивый парсинг items_json.
-# Совместимо с python-telegram-bot[webhooks] 21.x (рекомендуем 21.6).
+# Бот-вебхук для Render: меню → корзина → (при оформлении) запрос аудитории → комментарий (/skip) → подтверждение.
+# Новое: 🔥 глобальная скидка -20% на все товары (цены и суммы считаются со скидкой и ярко показываются в меню).
+# Плюс: удаление из корзины, доставка 99 ₽, статусы для админа, /fixdb миграция «кривых» записей, устойчивый парсинг items_json.
 
 import os, json, sqlite3, re, logging
 from datetime import datetime
 from typing import Dict, Any, Tuple
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
 )
 
-# ---------------- .env ----------------
+# ---------- .env ----------
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -38,16 +37,17 @@ WEBHOOK_SECRET_PATH = os.getenv("WEBHOOK_SECRET_PATH", "tgwebhook")
 PORT = int(os.environ.get("PORT", "10000"))
 
 DELIVERY_FEE = 5
+DISCOUNT_PERCENT = 20  # 🔥 -20% на всё
 ROOM_RE = re.compile(r'^\d+[A-Za-zА-Яа-я]$')
 
 MENU: Dict[str, tuple] = {
-    "energy": ("ЭНЕРГИЯ", 59),
-    "cola": ("КОЛА (ориг)", 99),
-    "chips": ("ЧИПСЫ", 72),
-    "pepsi": ("ПЕПСИ (ориг)", 96),
+    "energy": ("ЭНЕРГЕТИК", 65),
+    "cola": ("КОЛА (ориг)", 110),
+    "chips": ("ЧИПСЫ", 70),
+    "pepsi": ("ПЕПСИ (ориг)", 105),
     "water": ("ВОДА", 44),
     "chocopie": ("ЧОКОПАЙ", 25),
-    "7up": ("СЕВЭНАП (ориг)", 96),
+    "7up": ("СЕВЭНАП (ориг)", 105),
     "twix": ("ТВИКС(бол)", 108),
     "sok": ("СОК (ябл)", 49),
 }
@@ -57,7 +57,14 @@ log = logging.getLogger("snackbot")
 
 STATE: Dict[int, Dict[str, Any]] = {}
 
-# ---------------- DB ----------------
+# ---------- helpers: цена/скидки ----------
+def price_after_discount(price: int) -> int:
+    return int(round(price * (100 - DISCOUNT_PERCENT) / 100))
+
+def fmt_rub(x: int) -> str:
+    return f"{x}₽"
+
+# ---------- DB ----------
 def db_init():
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -101,9 +108,6 @@ def db_update_status(order_id:int, status:str):
     conn.close()
 
 def _parse_items_json(value: str) -> Dict[str, int]:
-    """Пытаемся распарсить корректный JSON; если нет — поддержим старый формат str(dict).
-    Если внутри случайно лежит 'комната' (например '455U'/'456В'), тихо возвращаем пустой dict без warning.
-    """
     if not value:
         return {}
     if ROOM_RE.fullmatch(value.strip()):
@@ -137,10 +141,6 @@ def db_get_order(order_id:int):
     return rec
 
 def db_sanitize() -> Tuple[int, int]:
-    """Оздоровление старых записей: очищаем items_json, если он не парсится;
-    если room пустая, а items_json выглядит как 'комната' — переносим в room.
-    Возвращаем (count_fixed, moved_to_room).
-    """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("SELECT id, items_json, room FROM orders")
@@ -166,16 +166,26 @@ def db_sanitize() -> Tuple[int, int]:
     conn.close()
     return fixed, moved
 
-# ---------------- Helpers/UI ----------------
+# ---------- UI ----------
 def fmt_items(cart:Dict[str,int])->str:
     if not cart: return "—"
-    return "\n".join(f"• {MENU[k][0]} ×{q} = {MENU[k][1]*q}₽" for k,q in cart.items() if k in MENU)
+    lines = []
+    for k,q in cart.items():
+        if k in MENU:
+            name, base = MENU[k]
+            disc = price_after_discount(base)
+            line_total = disc*q
+            lines.append(f"• {name} ×{q} = {fmt_rub(line_total)} 🔥(-{DISCOUNT_PERCENT}%)")
+    return "\n".join(lines)
 
 def get_cart_subtotal(cart:Dict[str,int])->int:
-    return sum(MENU[i][1]*q for i,q in cart.items() if i in MENU)
+    return sum(price_after_discount(MENU[i][1])*q for i,q in cart.items() if i in MENU)
 
 def menu_keyboard()->InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(f"{v[0]} — {v[1]}₽", callback_data=f"add:{k}")] for k,v in MENU.items()]
+    rows = []
+    for k,(name, base) in MENU.items():
+        disc = price_after_discount(base)
+        rows.append([InlineKeyboardButton(f"{name}: {base}₽ → {disc}₽ 🔥-20%", callback_data=f"add:{k}")])
     rows.append([InlineKeyboardButton("🧺 Корзина", callback_data="cart"),
                  InlineKeyboardButton("✅ Оформить", callback_data="checkout")])
     rows.append([InlineKeyboardButton("🏫 Сменить аудиторию", callback_data="change_room")])
@@ -198,7 +208,7 @@ def cart_keyboard(cart:Dict[str,int])->InlineKeyboardMarkup:
                InlineKeyboardButton("✅ Оформить", callback_data="checkout")])
     return InlineKeyboardMarkup(kb)
 
-# ---------------- Bot Logic ----------------
+# ---------- Bot logic ----------
 async def ensure_state(update: Update)->Dict[str,Any]:
     chat_id = update.effective_chat.id
     if chat_id not in STATE:
@@ -207,10 +217,9 @@ async def ensure_state(update: Update)->Dict[str,Any]:
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = await ensure_state(update)
-    # Новый сценарий: сначала меню, потом аудитория при оформлении
     st["awaiting"] = None
     await update.message.reply_text(
-        "Привет! 🍫 Выбирай из меню, доставка 0₽. Когда будешь готов — жми «Оформить».",
+        "Привет! 🍫 Сегодня 🔥СКИДКА -20% на всё. Выбирай из меню, доставка 99₽. Когда будешь готов — жми «Оформить».",
         reply_markup=menu_keyboard()
     )
 
@@ -223,7 +232,6 @@ async def fixdb_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ База очищена.\nИсправлено записей: {fixed}\nПеренесено в room: {moved}")
 
 async def skip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка /skip — работает теперь как отдельная команда (не режется фильтром)."""
     st = await ensure_state(update)
     if st.get("awaiting") != "comment":
         await update.message.reply_text("Сейчас нечего пропускать. Выбирай позиции в меню или жми «Оформить».",
@@ -236,9 +244,9 @@ async def skip_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Комментарий пропущен ✅\n"
         "Проверь сумму и подтверди заказ:\n"
-        f"💰 Товары: {subtotal}₽\n"
-        f"🚚 Доставка: {DELIVERY_FEE}₽\n"
-        f"Итого к оплате: {grand}₽",
+        f"💰 Товары (со скидкой -{DISCOUNT_PERCENT}%): {fmt_rub(subtotal)}\n"
+        f"🚚 Доставка: {fmt_rub(DELIVERY_FEE)}\n"
+        f"Итого к оплате: {fmt_rub(grand)}",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💳 Подтвердить заказ", callback_data="confirm")]])
     )
 
@@ -258,10 +266,12 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("add:"):
         item = data.split(":", 1)[1]
         st["cart"][item] = st["cart"].get(item, 0) + 1
+        base = MENU[item][1]
+        disc = price_after_discount(base)
         subtotal = get_cart_subtotal(st["cart"])
         await query.edit_message_text(
-            f"Добавил: {MENU[item][0]} — {MENU[item][1]}₽\n"
-            f"Текущая сумма товаров: {subtotal}₽",
+            f"Добавил: {MENU[item][0]} — {base}₽ → {disc}₽ 🔥-20%\n"
+            f"Текущая сумма (со скидкой): {fmt_rub(subtotal)}",
             reply_markup=menu_keyboard()
         )
         return
@@ -275,9 +285,9 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = [
             "🧺 Твоя корзина:",
             fmt_items(st["cart"]),
-            f"\n💰 Товары: {subtotal}₽",
-            f"🚚 Доставка: {DELIVERY_FEE}₽",
-            f"Итого: {grand}₽",
+            f"\n💰 Товары (со скидкой -{DISCOUNT_PERCENT}%): {fmt_rub(subtotal)}",
+            f"🚚 Доставка: {fmt_rub(DELIVERY_FEE)}",
+            f"Итого: {fmt_rub(grand)}",
         ]
         await query.edit_message_text("\n".join(lines), reply_markup=cart_keyboard(st["cart"]))
         return
@@ -298,9 +308,9 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = [
             "🧺 Твоя корзина (обновлено):",
             fmt_items(st["cart"]),
-            f"\n💰 Товары: {subtotal}₽",
-            f"🚚 Доставка: {DELIVERY_FEE}₽",
-            f"Итого: {grand}₽",
+            f"\n💰 Товары (со скидкой -{DISCOUNT_PERCENT}%): {fmt_rub(subtotal)}",
+            f"🚚 Доставка: {fmt_rub(DELIVERY_FEE)}",
+            f"Итого: {fmt_rub(grand)}",
         ]
         await query.edit_message_text("\n".join(lines), reply_markup=cart_keyboard(st["cart"]))
         return
@@ -313,21 +323,19 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not st["cart"]:
             await query.edit_message_text("Корзина пуста.", reply_markup=menu_keyboard())
             return
-        # Новый сценарий: если аудитория не указана — сначала спросим, потом комментарий/подтверждение
         if not st["room"]:
             st["awaiting"] = "room"
             await query.edit_message_text("Введи аудиторию (цифры + буква, например 429Г):")
             return
 
-        # если аудитория уже есть — сразу к подтверждению с опцией комментария
         subtotal = get_cart_subtotal(st["cart"])
         grand = subtotal + DELIVERY_FEE
         lines = [
             f"📍 Аудитория {st['room']}",
             fmt_items(st["cart"]),
-            f"\n💰 Товары: {subtotal}₽",
-            f"🚚 Доставка: {DELIVERY_FEE}₽",
-            f"Итого к оплате: {grand}₽"
+            f"\n💰 Товары (со скидкой -{DISCOUNT_PERCENT}%): {fmt_rub(subtotal)}",
+            f"🚚 Доставка: {fmt_rub(DELIVERY_FEE)}",
+            f"Итого к оплате: {fmt_rub(grand)}"
         ]
         kb = [[InlineKeyboardButton("✍️ Добавить комментарий", callback_data="add_comment")],
               [InlineKeyboardButton("💳 Подтвердить без комментария", callback_data="confirm")]]
@@ -350,9 +358,9 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"От @{user.username or '—'} (id {user.id})\n"
             f"Аудитория: {st['room']}\n"
             f"{fmt_items(st['cart'])}\n\n"
-            f"💰 Товары: {subtotal}₽\n"
-            f"🚚 Доставка: {DELIVERY_FEE}₽\n"
-            f"Итого: {grand}₽\n"
+            f"💰 Товары (со скидкой -{DISCOUNT_PERCENT}%): {fmt_rub(subtotal)}\n"
+            f"🚚 Доставка: {fmt_rub(DELIVERY_FEE)}\n"
+            f"Итого: {fmt_rub(grand)}\n"
             f"Комментарий: {note}"
         )
         for aid in ADMIN_IDS:
@@ -366,15 +374,14 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=chat_id,
             text=(
                 f"✅ Заказ #{order_id} принят!\n\n"
-                f"💰 Товары: {subtotal}₽\n"
-                f"🚚 Доставка: {DELIVERY_FEE}₽\n"
-                f"Итого к оплате: {grand}₽\n"
+                f"💰 Товары (со скидкой -{DISCOUNT_PERCENT}%): {fmt_rub(subtotal)}\n"
+                f"🚚 Доставка: {fmt_rub(DELIVERY_FEE)}\n"
+                f"Итого к оплате: {fmt_rub(grand)}\n"
                 f"Комментарий: {note}"
             ),
         )
         st["cart"].clear()
         st["note"] = None
-        # Аудиторию оставляем, чтобы было удобно, но можно сменить кнопкой «Сменить аудиторию».
         return
 
     if data.startswith("adm:"):
@@ -413,12 +420,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if st.get("awaiting") == "room":
         if not ROOM_RE.fullmatch(text):
-            await update.message.reply_text("Формат аудитории: цифры + буква (например, 429Г).")
+            await update.message.reply_text("Формат аудитории: цифры + буква (например, 429Г)."
+                                            )
             return
         st["room"] = text.upper()
         st["awaiting"] = None
 
-        # После установки аудитории показываем сводку и предлагаем комментарий/подтверждение
         if not st["cart"]:
             await update.message.reply_text("Аудитория сохранена. Корзина пуста — выбери позиции из меню:",
                                             reply_markup=menu_keyboard())
@@ -428,9 +435,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = [
             f"📍 Аудитория {st['room']}",
             fmt_items(st["cart"]),
-            f"\n💰 Товары: {subtotal}₽",
-            f"🚚 Доставка: {DELIVERY_FEE}₽",
-            f"Итого к оплате: {grand}₽"
+            f"\n💰 Товары (со скидкой -{DISCOUNT_PERCENT}%): {fmt_rub(subtotal)}",
+            f"🚚 Доставка: {fmt_rub(DELIVERY_FEE)}",
+            f"Итого к оплате: {fmt_rub(grand)}"
         ]
         kb = [[InlineKeyboardButton("✍️ Добавить комментарий", callback_data="add_comment")],
               [InlineKeyboardButton("💳 Подтвердить без комментария", callback_data="confirm")]]
@@ -439,7 +446,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if st.get("awaiting") == "comment":
         if text == "/skip":
-            # На случай если /skip придёт текстом (не как команда)
             st["note"] = None
         else:
             st["note"] = text
@@ -449,21 +455,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "Комментарий сохранён ✅\n"
             "Проверь сумму и подтверди заказ:\n"
-            f"💰 Товары: {subtotal}₽\n"
-            f"🚚 Доставка: {DELIVERY_FEE}₽\n"
-            f"Итого к оплате: {grand}₽",
+            f"💰 Товары (со скидкой -{DISCOUNT_PERCENT}%): {fmt_rub(subtotal)}\n"
+            f"🚚 Доставка: {fmt_rub(DELIVERY_FEE)}\n"
+            f"Итого к оплате: {fmt_rub(grand)}",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💳 Подтвердить заказ", callback_data="confirm")]])
         )
         return
 
-    # По умолчанию — просто открываем меню снова
     await update.message.reply_text("Добавляй позиции из меню:", reply_markup=menu_keyboard())
 
-# ---------------- Error handler ----------------
+# ---------- Error handler ----------
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.exception("Unhandled error in handler", exc_info=context.error)
 
-# ---------------- Main (blocking run_webhook) ----------------
+# ---------- Main ----------
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("Не указан BOT_TOKEN")
@@ -471,7 +476,7 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("skip", skip_cmd))          # <-- фикс /skip
+    app.add_handler(CommandHandler("skip", skip_cmd))
     app.add_handler(CommandHandler("fixdb", fixdb_cmd))
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
@@ -479,7 +484,7 @@ def main():
 
     base = BASE_URL
     if not base:
-        raise RuntimeError("BASE_URL не задан и не удалось определить автоматически. Укажи BASE_URL в Environment или положись на RENDER_EXTERNAL_URL.")
+        raise RuntimeError("BASE_URL не задан и не удалось определить автоматически. Укажи BASE_URL/RENDER_EXTERNAL_URL.")
     webhook_url = f"{base.rstrip('/')}/{WEBHOOK_SECRET_PATH}"
 
     log.info(f"Starting webhook on 0.0.0.0:{PORT} → {webhook_url}")
