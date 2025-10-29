@@ -43,13 +43,14 @@ ROOM_RE = re.compile(r'^\d+[A-Za-zА-Яа-я]$')
 MENU: Dict[str, tuple] = {
     "energy": ("ЭНЕРГЕТИК", 65),
     "cola": ("КОЛА (ориг)", 110),
-    "chips": ("ЧИПСЫ", 70),
+    "chips": ("ЧИПСЫ", 75),
     "pepsi": ("ПЕПСИ (ориг)", 105),
     "water": ("ВОДА", 44),
     "chocopie": ("ЧОКОПАЙ", 25),
     "7up": ("СЕВЭНАП (ориг)", 105),
-    "twix": ("ТВИКС(бол)", 108),
+    "twix": ("ТВИКС(бол)", 118),
     "sok": ("СОК (ябл)", 49),
+    "mirinda": ("МИРИНДА (ориг)", 105),
 }
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
