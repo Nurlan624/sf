@@ -41,7 +41,7 @@ DISCOUNT_PERCENT = 20  # 🔥 -20% на всё
 ROOM_RE = re.compile(r'^\d+[A-Za-zА-Яа-я]$')
 
 MENU: Dict[str, tuple] = {
-    "energy": ("ЭНЕРГИЯ !распродано!", 65),
+    "energy": ("ЭНЕРГИЯ", 65),
     "cola": ("КОЛА (ориг)", 110),
     "chips": ("ЧИПСЫ", 75),
     "pepsi": ("ПЕПСИ (ориг)", 105),
