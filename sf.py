@@ -43,13 +43,13 @@ ROOM_RE = re.compile(r'^\d+[A-Za-zА-Яа-я]$')
 MENU: Dict[str, tuple] = {
     "energy": ("ЭНЕРГИЯ", 65),
     "cola": ("КОЛА (ориг)", 110),
-    "chips": ("ЧИПСЫ", 75),
+    "chips": ("ЧИПСЫ", 65),
     "pepsi": ("ПЕПСИ (ориг)", 105),
     "water": ("ВОДА", 44),
     "chocopie": ("ЧОКОПАЙ", 25),
     "7up": ("СЕВЭНАП (ориг)", 105),
-    "twix": ("ТВИКС(бол)", 118),
-    "sok": ("СОК (ябл)", 49),
+    "twix": ("ТВИКС(бол)", 108),
+    "sok": ("СОК (ябл)", 39),
     "mirinda": ("МИРИНДА (ориг)", 105),
 }
 
@@ -220,7 +220,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = await ensure_state(update)
     st["awaiting"] = None
     await update.message.reply_text(
-        "Привет! 🍫 Сегодня 🔥СКИДКА -20% на всё. Выбирай из меню, доставка 99₽. Когда будешь готов — жми «Оформить».",
+        "Привет! 🍫 Сегодня 🔥СКИДКА -20% на всё. Выбирай из меню, доставка 5₽. Когда будешь готов — жми «Оформить».",
         reply_markup=menu_keyboard()
     )
 
