@@ -352,8 +352,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         disc = price_after_discount(base)
         subtotal = get_cart_subtotal(st["cart"])
         await query.edit_message_text(
-            f"Добавил: {MENU[item][0]} — {strike(str(base)+'₽')} → {disc}₽ 🔥-20%
-"
+            f"Добавил: {MENU[item][0]} — {strike(str(base)+'₽')} → {disc}₽ 🔥-20%"
             f"Текущая сумма (со скидкой): {fmt_rub(subtotal)}",
             reply_markup=menu_keyboard(st.get("category") or None)
         )
