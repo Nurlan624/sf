@@ -71,6 +71,10 @@ def price_after_discount(price: int) -> int:
 def fmt_rub(x: int) -> str:
     return f"{x}₽"
 
+def strike(s: str) -> str:
+    """Unicode комбинирование для зачёркивания (работает и в кнопках)."""
+    return ''.join((ch + '\u0336') if ch != ' ' else ' ' for ch in s)
+
 # ---------- DB ----------
 def db_init():
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
@@ -193,12 +197,12 @@ def menu_keyboard(category: str = None)->InlineKeyboardMarkup:
     if category == "drinks":
         for k,(name, base) in DRINKS.items():
             disc = price_after_discount(base)
-            rows.append([InlineKeyboardButton(f"{name}: {base}₽ → {disc}₽ 🔥-20%", callback_data=f"add:{k}")])
+            rows.append([InlineKeyboardButton(f"{name}: {strike(str(base)+ '₽')} → {disc}₽ 🔥-20%", callback_data=f"add:{k}")])
         rows.append([InlineKeyboardButton("⬅️ К категориям", callback_data="cat:back")])
     elif category == "snacks":
         for k,(name, base) in SNACKS.items():
             disc = price_after_discount(base)
-            rows.append([InlineKeyboardButton(f"{name}: {base}₽ → {disc}₽ 🔥-20%", callback_data=f"add:{k}")])
+            rows.append([InlineKeyboardButton(f"{name}: {strike(str(base)+ '₽')} → {disc}₽ 🔥-20%", callback_data=f"add:{k}")])
         rows.append([InlineKeyboardButton("⬅️ К категориям", callback_data="cat:back")])
     else:
         rows.append([InlineKeyboardButton("🥤 Напитки", callback_data="cat:drinks")])
@@ -348,7 +352,8 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         disc = price_after_discount(base)
         subtotal = get_cart_subtotal(st["cart"])
         await query.edit_message_text(
-            f"Добавил: {MENU[item][0]} — {base}₽ → {disc}₽ 🔥-20%\n"
+            f"Добавил: {MENU[item][0]} — {strike(str(base)+'₽')} → {disc}₽ 🔥-20%
+"
             f"Текущая сумма (со скидкой): {fmt_rub(subtotal)}",
             reply_markup=menu_keyboard(st.get("category") or None)
         )
