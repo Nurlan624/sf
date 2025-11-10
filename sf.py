@@ -38,22 +38,25 @@ BASE_URL = _auto_base_url()
 WEBHOOK_SECRET_PATH = os.getenv("WEBHOOK_SECRET_PATH", "tgwebhook")
 PORT = int(os.environ.get("PORT", "10000"))
 
-DELIVERY_FEE = 99
+DELIVERY_FEE = 9
 DISCOUNT_PERCENT = 20  # 🔥 -20% на всё
 ROOM_RE = re.compile(r'^\d+[A-Za-zА-Яа-я]$')
 
 # ---------- Меню: категории ----------
 DRINKS: Dict[str, tuple] = {
     "energy": ("ЭНЕРГЕТИК", 65),
-    "cola": ("КОЛА (ориг)", 110),
+    "cola": ("МИРИНДА (ориг)", 105),
     "pepsi": ("ПЕПСИ (ориг)", 105),
     "7up": ("СЕВЭНАП (ориг)", 105),
     "water": ("ВОДА", 44),
+    "sok": ("СОК яб", 39),
 }
 
 SNACKS: Dict[str, tuple] = {
     "chips": ("ЧИПСЫ", 70),
     "chocopie": ("ЧОКОПАЙ", 25),
+    "twix": ("ТВИКС", 98),
+    "sandwich": ("ПИЗДАТЫЙ СЭНДВИЧ", 120),
 }
 
 # Общее меню для расчётов
@@ -206,7 +209,7 @@ def menu_keyboard(category: str = None)->InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton("⬅️ К категориям", callback_data="cat:back")])
     else:
         rows.append([InlineKeyboardButton("🥤 Напитки", callback_data="cat:drinks")])
-        rows.append([InlineKeyboardButton("🍪 Снэки", callback_data="cat:snacks")])
+        rows.append([InlineKeyboardButton("🍔 Снэки", callback_data="cat:snacks")])
     # общие кнопки
     rows.append([InlineKeyboardButton("🧺 Корзина", callback_data="cart"),
                  InlineKeyboardButton("✅ Оформить", callback_data="checkout")])
@@ -248,7 +251,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st["category"] = None
     await update.message.reply_text(
         "Привет! 🍫 Сегодня 🔥СКИДКА -20% на всё.\n"
-        "Сначала выбери категорию, потом позиции из меню. Доставка 99₽.\n"
+        "Сначала выбери категорию, потом позиции из меню. Доставка 9₽.\n"
         "Когда будешь готов — жми «Оформить».",
         reply_markup=menu_keyboard()
     )
