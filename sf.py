@@ -4,6 +4,7 @@
 #   🔥 глобальная скидка -20% на все товары
 #   🥤 отдельные категории: «Напитки» и «Снэки»
 #   🏫 при выборе аудитории можно нажать кнопку «Столовая» вместо ввода номера
+#   📢 Команда /broadcast для админа — рассылает сообщение всем, кто делал заказ
 
 import os, json, sqlite3, re, logging
 from datetime import datetime
@@ -45,18 +46,18 @@ ROOM_RE = re.compile(r'^\d+[A-Za-zА-Яа-я]$')
 # ---------- Меню: категории ----------
 DRINKS: Dict[str, tuple] = {
     "energy": ("ЭНЕРГЕТИК", 65),
-    "cola": ("МИРИНДА (ориг)", 105),
+    "mirinda": ("МИРИНДА (ориг)", 110),
     "pepsi": ("ПЕПСИ (ориг)", 105),
     "7up": ("СЕВЭНАП (ориг)", 105),
     "water": ("ВОДА", 44),
-    "sok": ("СОК яб", 39),
+    "sok": ("СОК (ябл)", 40),
 }
 
 SNACKS: Dict[str, tuple] = {
     "chips": ("ЧИПСЫ", 70),
     "chocopie": ("ЧОКОПАЙ", 25),
+    "sandwitch": ("СЭНДВИЧ", 108),
     "twix": ("ТВИКС", 98),
-    "sandwich": ("СЭНДВИЧ", 115),
 }
 
 # Общее меню для расчётов
@@ -75,7 +76,7 @@ def fmt_rub(x: int) -> str:
     return f"{x}₽"
 
 def strike(s: str) -> str:
-    """Unicode комбинирование для зачёркивания (работает и в кнопках)."""
+    """Unicode-зачёркивание (видно даже в inline-кнопках)."""
     return ''.join((ch + '\u0336') if ch != ' ' else ' ' for ch in s)
 
 # ---------- DB ----------
@@ -200,16 +201,16 @@ def menu_keyboard(category: str = None)->InlineKeyboardMarkup:
     if category == "drinks":
         for k,(name, base) in DRINKS.items():
             disc = price_after_discount(base)
-            rows.append([InlineKeyboardButton(f"{name}: {strike(str(base)+ '₽')} → {disc}₽ 🔥-20%", callback_data=f"add:{k}")])
+            rows.append([InlineKeyboardButton(f"{name}: {strike(str(base)+'₽')} → {disc}₽ 🔥-20%", callback_data=f"add:{k}")])
         rows.append([InlineKeyboardButton("⬅️ К категориям", callback_data="cat:back")])
     elif category == "snacks":
         for k,(name, base) in SNACKS.items():
             disc = price_after_discount(base)
-            rows.append([InlineKeyboardButton(f"{name}: {strike(str(base)+ '₽')} → {disc}₽ 🔥-20%", callback_data=f"add:{k}")])
+            rows.append([InlineKeyboardButton(f"{name}: {strike(str(base)+'₽')} → {disc}₽ 🔥-20%", callback_data=f"add:{k}")])
         rows.append([InlineKeyboardButton("⬅️ К категориям", callback_data="cat:back")])
     else:
         rows.append([InlineKeyboardButton("🥤 Напитки", callback_data="cat:drinks")])
-        rows.append([InlineKeyboardButton("🍔 Снэки", callback_data="cat:snacks")])
+        rows.append([InlineKeyboardButton("🍪 Снэки", callback_data="cat:snacks")])
     # общие кнопки
     rows.append([InlineKeyboardButton("🧺 Корзина", callback_data="cart"),
                  InlineKeyboardButton("✅ Оформить", callback_data="checkout")])
@@ -355,7 +356,7 @@ async def cb_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         disc = price_after_discount(base)
         subtotal = get_cart_subtotal(st["cart"])
         await query.edit_message_text(
-            f"Добавил: {MENU[item][0]} — {strike(str(base)+'₽')} → {disc}₽ 🔥-20%"
+            f"Добавил: {MENU[item][0]} — {strike(str(base)+'₽')} → {disc}₽ 🔥-20%\n"
             f"Текущая сумма (со скидкой): {fmt_rub(subtotal)}",
             reply_markup=menu_keyboard(st.get("category") or None)
         )
@@ -563,6 +564,48 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("Выбирай категорию и добавляй позиции из меню:", reply_markup=menu_keyboard(st.get("category") or None))
 
+# ---------- Broadcast (рассылка) ----------
+def db_get_unique_order_users():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT user_id FROM orders WHERE user_id IS NOT NULL")
+    rows = cur.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Команда только для админов.")
+        return
+
+    if context.args:
+        text = " ".join(context.args)
+    else:
+        text = (
+            "🔥 Обновление меню!\n"
+            "Теперь меню разделено на категории: 🥤 напитки и 🍪 снэки.\n"
+            "И действует СКИДКА -20% на всё + доставка всего 9₽! 🚀"
+        )
+
+    users = db_get_unique_order_users()
+    if not users:
+        await update.message.reply_text("Пользователей с заказами пока нет, рассылать некому.")
+        return
+
+    sent = 0
+    failed = 0
+    for uid in users:
+        try:
+            await context.bot.send_message(uid, text)
+            sent += 1
+        except Exception:
+            failed += 1
+
+    await update.message.reply_text(
+        f"📢 Рассылка завершена.\nОтправлено: {sent}\nНе доставлено: {failed}"
+    )
+
 # ---------- Error handler ----------
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.exception("Unhandled error in handler", exc_info=context.error)
@@ -577,6 +620,7 @@ def main():
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("skip", skip_cmd))
     app.add_handler(CommandHandler("fixdb", fixdb_cmd))
+    app.add_handler(CommandHandler("broadcast", broadcast_cmd))
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_error_handler(on_error)
