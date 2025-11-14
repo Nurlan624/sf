@@ -56,7 +56,7 @@ DRINKS: Dict[str, tuple] = {
 SNACKS: Dict[str, tuple] = {
     "chips": ("ЧИПСЫ", 70),
     "chocopie": ("ЧОКОПАЙ", 25),
-    "sandwitch": ("СЭНДВИЧ", 108),
+    "sandwitch": ("СЭНДВИЧ", 189),
     "twix": ("ТВИКС", 98),
 }
 
@@ -67,6 +67,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 log = logging.getLogger("snackbot")
 
 STATE: Dict[int, Dict[str, Any]] = {}
+
+BROADCAST_WAITING = set()  # админы, от которых ждём данные для рассылки
 
 # ---------- helpers: цена/скидки ----------
 def price_after_discount(price: int) -> int:
@@ -579,14 +581,26 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Команда только для админов.")
         return
 
-    if context.args:
-        text = " ".join(context.args)
-    else:
-        text = (
-            "🔥 Обновление меню!\n"
-            "Теперь меню разделено на категории: 🥤 напитки и 🍪 снэки.\n"
-            "И действует СКИДКА -20% на всё + доставка всего 9₽! 🚀"
-        )
+    BROADCAST_WAITING.add(user_id)
+    await update.message.reply_text(
+        "Ок! Теперь отправь *фото с подписью* — я разошлю его всем пользователям, которые уже делали заказ ✅"
+    )
+
+async def broadcast_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if user_id not in BROADCAST_WAITING:
+        # Это просто чья-то фотка, не про рассылку
+        return
+
+    BROADCAST_WAITING.discard(user_id)
+
+    if not update.message.photo:
+        await update.message.reply_text("Нужно отправить именно фото 📸")
+        return
+
+    photo = update.message.photo[-1].file_id
+    caption = update.message.caption or "📢 Обновление меню и скидки! 🔥"
 
     users = db_get_unique_order_users()
     if not users:
@@ -597,7 +611,7 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     failed = 0
     for uid in users:
         try:
-            await context.bot.send_message(uid, text)
+            await context.bot.send_photo(uid, photo=photo, caption=caption)
             sent += 1
         except Exception:
             failed += 1
@@ -622,6 +636,7 @@ def main():
     app.add_handler(CommandHandler("fixdb", fixdb_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
     app.add_handler(CallbackQueryHandler(cb_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, broadcast_photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_error_handler(on_error)
 
